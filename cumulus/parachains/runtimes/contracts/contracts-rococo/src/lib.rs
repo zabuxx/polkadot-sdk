@@ -50,17 +50,20 @@ use frame_support::{
 	dispatch::DispatchClass,
 	genesis_builder_helper::{build_config, create_default_config},
 	parameter_types,
-	traits::{ConstBool, ConstU128, ConstU16, ConstU32, ConstU64, ConstU8},
+	traits::{AsEnsureOriginWithArg,ConstBool, ConstU128, ConstU16, ConstU32, ConstU64, ConstU8},
 	weights::{ConstantMultiplier, Weight},
 	PalletId,
 };
-use frame_system::limits::{BlockLength, BlockWeights};
+use frame_system::{
+    limits::{BlockLength, BlockWeights},
+    EnsureRoot, EnsureSigned,
+};
 pub use parachains_common as common;
 use parachains_common::{
 	impls::DealWithFees,
 	message_queue::*,
 	rococo::{consensus::*, currency::*, fee::WeightToFee},
-	AccountId, BlockNumber, Hash, Header, Nonce, Signature, AVERAGE_ON_INITIALIZE_RATIO,
+	AccountId, AssetIdForTrustBackedAssets, BlockNumber, Hash, Header, Nonce, Signature, AVERAGE_ON_INITIALIZE_RATIO,
 	MAXIMUM_BLOCK_WEIGHT, MINUTES, NORMAL_DISPATCH_RATIO, SLOT_DURATION,
 };
 pub use parachains_common::{AuraId, Balance};
@@ -237,6 +240,49 @@ impl pallet_transaction_payment::Config for Runtime {
 }
 
 parameter_types! {
+	pub const AssetDeposit: Balance = UNITS / 10; // 1 / 10 WND deposit to create asset
+	pub const AssetAccountDeposit: Balance = deposit(1, 16);
+	pub const ApprovalDeposit: Balance = EXISTENTIAL_DEPOSIT;
+	pub const AssetsStringLimit: u32 = 50;
+	/// Key = 32 bytes, Value = 36 bytes (32+1+1+1+1)
+	// https://github.com/paritytech/substrate/blob/069917b/frame/assets/src/lib.rs#L257L271
+	pub const MetadataDepositBase: Balance = deposit(1, 68);
+	pub const MetadataDepositPerByte: Balance = deposit(0, 1);
+}
+
+pub type AssetsForceOrigin = EnsureRoot<AccountId>;
+
+// Called "Trust Backed" assets because these are generally registered by some account, and users of
+// the asset assume it has some claimed backing. The pallet is called `Assets` in
+// `construct_runtime` to avoid breaking changes on storage reads.
+pub type TrustBackedAssetsInstance = pallet_assets::Instance1;
+type TrustBackedAssetsCall = pallet_assets::Call<Runtime, TrustBackedAssetsInstance>;
+impl pallet_assets::Config<TrustBackedAssetsInstance> for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Balance = Balance;
+	type AssetId = AssetIdForTrustBackedAssets;
+	type AssetIdParameter = codec::Compact<AssetIdForTrustBackedAssets>;
+	type Currency = Balances;
+	type CreateOrigin = AsEnsureOriginWithArg<EnsureSigned<AccountId>>;
+	type ForceOrigin = AssetsForceOrigin;
+	type AssetDeposit = AssetDeposit;
+	type MetadataDepositBase = MetadataDepositBase;
+	type MetadataDepositPerByte = MetadataDepositPerByte;
+	type ApprovalDeposit = ApprovalDeposit;
+	type StringLimit = AssetsStringLimit;
+	type Freezer = ();
+	type Extra = ();
+	type WeightInfo = weights::pallet_assets_local::WeightInfo<Runtime>;
+	type CallbackHandle = ();
+	type AssetAccountDeposit = AssetAccountDeposit;
+	type RemoveItemsLimit = ConstU32<1000>;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
+}
+
+
+
+parameter_types! {
 	// One storage item; key size is 32; value is size 4+4+16+32 bytes = 56 bytes.
 	pub const DepositBase: Balance = deposit(1, 88);
 	// Additional storage item size of 32 bytes.
@@ -407,7 +453,8 @@ construct_runtime!(
 		// Handy utilities.
 		Utility: pallet_utility::{Pallet, Call, Event} = 50,
 		Multisig: pallet_multisig::{Pallet, Call, Storage, Event<T>} = 51,
-
+		Assets: pallet_assets::<Instance1>::{Pallet, Call, Storage, Event<T>} = 52,
+	    
 		// Sudo
 		Sudo: pallet_sudo::{Pallet, Call, Config<T>, Event<T>, Storage} = 100,
 	}
@@ -416,7 +463,8 @@ construct_runtime!(
 #[cfg(feature = "runtime-benchmarks")]
 mod benches {
 	frame_benchmarking::define_benchmarks!(
-		[frame_system, SystemBench::<Runtime>]
+	    [frame_system, SystemBench::<Runtime>]
+		[pallet_assets, Local]		
 		[pallet_balances, Balances]
 		[pallet_message_queue, MessageQueue]
 		[pallet_multisig, Multisig]
