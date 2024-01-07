@@ -57,6 +57,8 @@ pallet-transaction-payment-rpc-runtime-api = { path = "../../../../../substrate/
 pallet-utility = { path = "../../../../../substrate/frame/utility", default-features = false }
 pallet-sudo = { path = "../../../../../substrate/frame/sudo", default-features = false }
 pallet-contracts = { path = "../../../../../substrate/frame/contracts", default-features = false }
+# num-traits feature needed for dex integer sq root:
+primitive-types = { version = "0.12.1", default-features = false, features = ["codec", "num-traits", "scale-info"] }
 
 # Polkadot
 pallet-xcm = { path = "../../../../../polkadot/xcm/pallet-xcm", default-features = false }
