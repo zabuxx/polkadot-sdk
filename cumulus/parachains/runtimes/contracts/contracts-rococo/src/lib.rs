@@ -29,15 +29,25 @@ mod contracts;
 mod weights;
 mod xcm_config;
 
+use assets_common::{
+	foreign_creators::ForeignCreators,
+	local_and_foreign_assets::{LocalFromLeft, TargetFromLeft},
+	matching::{FromNetwork, FromSiblingParachain},
+	AssetIdForTrustBackedAssetsConvert, MultiLocationForAssetId,
+};
+
+
 use cumulus_pallet_parachain_system::RelayNumberStrictlyIncreases;
 use cumulus_primitives_core::AggregateMessageOrigin;
+use snowbridge_rococo_common::EthereumNetwork;
 use sp_api::impl_runtime_apis;
 use sp_core::{crypto::KeyTypeId, OpaqueMetadata};
 use sp_runtime::{
-	create_runtime_str, generic, impl_opaque_keys,
-	traits::Block as BlockT,
-	transaction_validity::{TransactionSource, TransactionValidity},
-	ApplyExtrinsicResult, Perbill,
+    create_runtime_str, generic, impl_opaque_keys,
+    traits::AccountIdConversion,
+    traits::Block as BlockT,
+    transaction_validity::{TransactionSource, TransactionValidity},
+    ApplyExtrinsicResult, Perbill, Permill,
 };
 
 use sp_std::prelude::*;
@@ -46,17 +56,18 @@ use sp_version::NativeVersion;
 use sp_version::RuntimeVersion;
 
 use frame_support::{
-	construct_runtime, derive_impl,
-	dispatch::DispatchClass,
-	genesis_builder_helper::{build_config, create_default_config},
-	parameter_types,
-	traits::{AsEnsureOriginWithArg,ConstBool, ConstU128, ConstU16, ConstU32, ConstU64, ConstU8},
-	weights::{ConstantMultiplier, Weight},
-	PalletId,
+    construct_runtime, derive_impl,
+    dispatch::DispatchClass,
+    genesis_builder_helper::{build_config, create_default_config},
+    ord_parameter_types, parameter_types,
+    traits::{fungible,fungibles,tokens::imbalance::ResolveAssetTo, AsEnsureOriginWithArg,  ConstBool,
+	     ConstU128, ConstU16, ConstU32, ConstU64, ConstU8},
+    weights::{ConstantMultiplier, Weight},
+    PalletId,
 };
 use frame_system::{
     limits::{BlockLength, BlockWeights},
-    EnsureRoot, EnsureSigned,
+    EnsureRoot, EnsureSigned, EnsureSignedBy,
 };
 pub use parachains_common as common;
 use parachains_common::{
@@ -67,7 +78,13 @@ use parachains_common::{
 	MAXIMUM_BLOCK_WEIGHT, MINUTES, NORMAL_DISPATCH_RATIO, SLOT_DURATION,
 };
 pub use parachains_common::{AuraId, Balance};
-use xcm_config::CollatorSelectionUpdateOrigin;
+use xcm::opaque::v3::MultiLocation;
+use xcm_config::{
+    CollatorSelectionUpdateOrigin,
+    TrustBackedAssetsPalletLocation,
+    TokenLocation,
+    ForeignCreatorsSovereignAccountOf,
+};
 
 #[cfg(any(feature = "std", test))]
 pub use sp_runtime::BuildStorage;
@@ -282,6 +299,139 @@ impl pallet_assets::Config<TrustBackedAssetsInstance> for Runtime {
 
 
 
+/// Union fungibles implementation for `Assets`` and `ForeignAssets`.
+pub type LocalAndForeignAssets = fungibles::UnionOf<
+	Assets,
+	ForeignAssets,
+	LocalFromLeft<
+		AssetIdForTrustBackedAssetsConvert<TrustBackedAssetsPalletLocation>,
+		AssetIdForTrustBackedAssets,
+	>,
+	MultiLocation,
+	AccountId,
+>;
+
+
+
+impl pallet_asset_conversion::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Balance = Balance;
+	type HigherPrecisionBalance = sp_core::U256;
+	type AssetKind = MultiLocation;
+	type Assets = fungible::UnionOf<
+		Balances,
+		LocalAndForeignAssets,
+		TargetFromLeft<TokenLocation>,
+		Self::AssetKind,
+		Self::AccountId,
+	>;
+	type PoolId = (Self::AssetKind, Self::AssetKind);
+	type PoolLocator =
+		pallet_asset_conversion::WithFirstAsset<TokenLocation, AccountId, Self::AssetKind>;
+	type PoolAssetId = u32;
+	type PoolAssets = PoolAssets;
+	type PoolSetupFee = ConstU128<0>; // Asset class deposit fees are sufficient to prevent spam
+	type PoolSetupFeeAsset = TokenLocation;
+	type PoolSetupFeeTarget = ResolveAssetTo<AssetConversionOrigin, Self::Assets>;
+	type LiquidityWithdrawalFee = LiquidityWithdrawalFee;
+	type LPFee = ConstU32<3>;
+	type PalletId = AssetConversionPalletId;
+	type MaxSwapPathLength = ConstU32<3>;
+	type MintMinLiquidity = ConstU128<100>;
+	type WeightInfo = weights::pallet_asset_conversion::WeightInfo<Runtime>;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = assets_common::benchmarks::AssetPairFactory<
+		TokenLocation,
+		parachain_info::Pallet<Runtime>,
+		xcm_config::AssetsPalletIndex,
+	>;
+}
+
+
+parameter_types! {
+	pub const AssetConversionPalletId: PalletId = PalletId(*b"py/ascon");
+	pub const LiquidityWithdrawalFee: Permill = Permill::from_percent(0);
+}
+
+ord_parameter_types! {
+    pub const AssetConversionOrigin: sp_runtime::AccountId32 =
+ 	AccountIdConversion::<sp_runtime::AccountId32>::into_account_truncating(&AssetConversionPalletId::get());
+}
+
+pub type PoolAssetsInstance = pallet_assets::Instance3;
+impl pallet_assets::Config<PoolAssetsInstance> for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Balance = Balance;
+	type RemoveItemsLimit = ConstU32<1000>;
+	type AssetId = u32;
+	type AssetIdParameter = u32;
+	type Currency = Balances;
+	type CreateOrigin =
+		AsEnsureOriginWithArg<EnsureSignedBy<AssetConversionOrigin, sp_runtime::AccountId32>>;
+	type ForceOrigin = AssetsForceOrigin;
+	// Deposits are zero because creation/admin is limited to Asset Conversion pallet.
+	type AssetDeposit = ConstU128<0>;
+	type AssetAccountDeposit = ConstU128<0>;
+	type MetadataDepositBase = ConstU128<0>;
+	type MetadataDepositPerByte = ConstU128<0>;
+	type ApprovalDeposit = ApprovalDeposit;
+	type StringLimit = ConstU32<50>;
+	type Freezer = ();
+	type Extra = ();
+	type WeightInfo = weights::pallet_assets_pool::WeightInfo<Runtime>;
+	type CallbackHandle = ();
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
+}
+
+
+parameter_types! {
+	// we just reuse the same deposits
+	pub const ForeignAssetsAssetDeposit: Balance = AssetDeposit::get();
+	pub const ForeignAssetsAssetAccountDeposit: Balance = AssetAccountDeposit::get();
+	pub const ForeignAssetsApprovalDeposit: Balance = ApprovalDeposit::get();
+	pub const ForeignAssetsAssetsStringLimit: u32 = AssetsStringLimit::get();
+	pub const ForeignAssetsMetadataDepositBase: Balance = MetadataDepositBase::get();
+	pub const ForeignAssetsMetadataDepositPerByte: Balance = MetadataDepositPerByte::get();
+}
+
+/// Assets managed by some foreign location. Note: we do not declare a `ForeignAssetsCall` type, as
+/// this type is used in proxy definitions. We assume that a foreign location would not want to set
+/// an individual, local account as a proxy for the issuance of their assets. This issuance should
+/// be managed by the foreign location's governance.
+pub type ForeignAssetsInstance = pallet_assets::Instance2;
+impl pallet_assets::Config<ForeignAssetsInstance> for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Balance = Balance;
+	type AssetId = MultiLocationForAssetId;
+	type AssetIdParameter = MultiLocationForAssetId;
+	type Currency = Balances;
+	type CreateOrigin = ForeignCreators<
+		(
+			FromSiblingParachain<parachain_info::Pallet<Runtime>>,
+			FromNetwork<xcm_config::UniversalLocation, EthereumNetwork>,
+		),
+		ForeignCreatorsSovereignAccountOf,
+		AccountId,
+	>;
+	type ForceOrigin = AssetsForceOrigin;
+	type AssetDeposit = ForeignAssetsAssetDeposit;
+	type MetadataDepositBase = ForeignAssetsMetadataDepositBase;
+	type MetadataDepositPerByte = ForeignAssetsMetadataDepositPerByte;
+	type ApprovalDeposit = ForeignAssetsApprovalDeposit;
+	type StringLimit = ForeignAssetsAssetsStringLimit;
+	type Freezer = ();
+	type Extra = ();
+	type WeightInfo = weights::pallet_assets_foreign::WeightInfo<Runtime>;
+	type CallbackHandle = ();
+	type AssetAccountDeposit = ForeignAssetsAssetAccountDeposit;
+	type RemoveItemsLimit = frame_support::traits::ConstU32<1000>;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = xcm_config::XcmBenchmarkHelper;
+}
+
+
+
 parameter_types! {
 	// One storage item; key size is 32; value is size 4+4+16+32 bytes = 56 bytes.
 	pub const DepositBase: Balance = deposit(1, 88);
@@ -454,7 +604,10 @@ construct_runtime!(
 		Utility: pallet_utility::{Pallet, Call, Event} = 50,
 		Multisig: pallet_multisig::{Pallet, Call, Storage, Event<T>} = 51,
 		Assets: pallet_assets::<Instance1>::{Pallet, Call, Storage, Event<T>} = 52,
-	    
+	    ForeignAssets: pallet_assets::<Instance2>::{Pallet, Call, Storage, Event<T>} = 53,
+	    PoolAssets: pallet_assets::<Instance3>::{Pallet, Call, Storage, Event<T>} = 55,
+		AssetConversion: pallet_asset_conversion::{Pallet, Call, Storage, Event<T>} = 56,
+    
 		// Sudo
 		Sudo: pallet_sudo::{Pallet, Call, Config<T>, Event<T>, Storage} = 100,
 	}
